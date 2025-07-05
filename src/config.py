@@ -68,7 +68,6 @@ class Config:
         cls.DOWNLOAD_DIR.mkdir(exist_ok=True)
         cls.LOGS_DIR.mkdir(exist_ok=True)
         
-        # Create subdirectories for each school
         for school in cls.SCHOOL_CODES:
             (cls.DOWNLOAD_DIR / school).mkdir(exist_ok=True)
     

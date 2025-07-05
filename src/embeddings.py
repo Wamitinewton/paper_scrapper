@@ -178,7 +178,6 @@ class EmbeddingsManager:
         if not papers:
             return []
         
-        # Filter papers that have been processed but don't have embeddings yet
         papers_to_embed = [
             p for p in papers 
             if p.is_processed and p.chunks and not p.embedding_id
@@ -190,7 +189,6 @@ class EmbeddingsManager:
         
         logger.info(f"Generating embeddings for {len(papers_to_embed)} papers")
         
-        # Process papers with rate limiting
         semaphore = asyncio.Semaphore(3)  # Limit concurrent OpenAI requests
         
         async def process_with_semaphore(paper):
@@ -216,8 +214,7 @@ class EmbeddingsManager:
             # Generate embedding for query
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # If we're in an async context, we need to handle this differently
-                query_embedding = None  # This would need to be handled by the caller
+                query_embedding = None 
             else:
                 query_embedding = asyncio.run(self._generate_embedding(query))
             
@@ -259,12 +256,10 @@ class EmbeddingsManager:
             # Get count by school
             school_counts = {}
             year_counts = {}
-            
-            # This is a simplified version - for large collections, 
-            # you might want to use aggregation queries
+
             scroll_result = self.qdrant_client.scroll(
                 collection_name=self.collection_name,
-                limit=10000  # Adjust based on your collection size
+                limit=10000 
             )
             
             for point in scroll_result[0]:

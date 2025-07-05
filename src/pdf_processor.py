@@ -211,7 +211,6 @@ class PDFProcessor:
         if any(term in text for term in ['exam', 'test', 'quiz', 'assignment']):
             metadata['assessment_type'] = 'exam'
         
-        # Extract course codes (pattern like CS101, MATH201, etc.)
         course_codes = re.findall(r'\b[A-Z]{2,4}\s*\d{3,4}\b', paper.extracted_text)
         if course_codes:
             metadata['course_codes'] = list(set(course_codes))

@@ -49,7 +49,6 @@ class ExamPaperPipeline:
             # Scrape all papers
             papers, session = await scraper.scrape_all(schools, years)
             
-            # Retry failed downloads if requested
             if retry_failed and session.total_papers_failed > 0:
                 logger.info(f"Retrying {session.total_papers_failed} failed downloads")
                 papers = await scraper.retry_failed_downloads(papers)
@@ -183,7 +182,6 @@ class ExamPaperPipeline:
     
     def _load_existing_papers(self) -> List[ExamPaper]:
         """Load existing papers from saved data."""
-        # This would load from previous runs - implement based on your needs
         return []
     
     def _print_final_summary(self, papers: List[ExamPaper], duration: float) -> None:

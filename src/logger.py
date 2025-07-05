@@ -9,17 +9,14 @@ from .config import Config
 def setup_logging(log_level: Optional[str] = None, log_file: Optional[Path] = None) -> None:
     """Set up structured logging for the application."""
     
-    # Use config defaults if not provided
     if log_level is None:
         log_level = Config.LOG_LEVEL
     
     if log_file is None:
         log_file = Config.LOG_FILE
     
-    # Ensure log directory exists
     log_file.parent.mkdir(parents=True, exist_ok=True)
     
-    # Configure structlog
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,
@@ -38,7 +35,6 @@ def setup_logging(log_level: Optional[str] = None, log_file: Optional[Path] = No
         cache_logger_on_first_use=True,
     )
     
-    # Configure standard logging
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
