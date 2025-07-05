@@ -1,4 +1,6 @@
-"""Main application entry point for the exam papers scraper."""
+"""
+Updated main.py with SSL configuration support
+"""
 
 import asyncio
 import argparse
@@ -21,19 +23,28 @@ logger = get_logger(__name__)
 class ExamPaperPipeline:
     """Complete pipeline for scraping, processing, and embedding exam papers."""
     
-    def __init__(self):
+    def __init__(self, verify_ssl: bool = True):
         """Initialize the pipeline."""
+        self.verify_ssl = verify_ssl
         self.scraper = None
         self.processor = PDFProcessor()
         self.embeddings_manager = EmbeddingsManager()
         
         # Validate configuration
-        config_errors = Config.validate()
-        if config_errors:
+        config_validation = Config.validate()
+        
+        # Handle errors
+        if config_validation["errors"]:
             logger.error("Configuration validation failed:")
-            for field, error in config_errors.items():
+            for field, error in config_validation["errors"].items():
                 logger.error(f"  {field}: {error}")
             raise ValueError("Invalid configuration. Please check your .env file.")
+        
+        # Handle warnings
+        if config_validation["warnings"]:
+            logger.warning("Configuration warnings:")
+            for field, warning in config_validation["warnings"].items():
+                logger.warning(f"  {field}: {warning}")
     
     async def scrape_papers(self, 
                            schools: Optional[List[str]] = None,
@@ -42,12 +53,13 @@ class ExamPaperPipeline:
         """Scrape exam papers from the website."""
         
         logger.info("Starting paper scraping phase")
+        logger.info(f"SSL verification: {'enabled' if self.verify_ssl else 'disabled'}")
         
-        async with ExamPaperScraper() as scraper:
+        async with ExamPaperScraper(verify_ssl=self.verify_ssl) as scraper:
             self.scraper = scraper
             
             # Scrape all papers
-            papers, session = await scraper.scrape_all(schools, years)
+            papers, session = await scraper.scrape_all(schools, years, verify_ssl=self.verify_ssl)
             
             if retry_failed and session.total_papers_failed > 0:
                 logger.info(f"Retrying {session.total_papers_failed} failed downloads")
@@ -200,6 +212,7 @@ class ExamPaperPipeline:
         print(f"Papers embedded: {embedded}")
         print(f"Total text chunks: {total_chunks}")
         print(f"Pipeline duration: {duration:.2f} seconds")
+        print(f"SSL verification: {'enabled' if self.verify_ssl else 'disabled'}")
         print("="*60)
         
         # School breakdown
@@ -248,11 +261,19 @@ async def main():
     parser.add_argument("--embed-only", action="store_true",
                        help="Only run the embeddings phase")
     
+    # SSL options
+    parser.add_argument("--no-ssl-verify", action="store_true",
+                       help="Disable SSL certificate verification (not recommended for production)")
+    parser.add_argument("--ignore-ssl-errors", action="store_true",
+                       help="Continue even if SSL errors occur")
+    
     # Configuration overrides
     parser.add_argument("--max-concurrent", type=int,
                        help="Maximum concurrent downloads")
     parser.add_argument("--batch-size", type=int,
                        help="Batch size for embeddings")
+    parser.add_argument("--timeout", type=int,
+                       help="Request timeout in seconds")
     
     args = parser.parse_args()
     
@@ -261,9 +282,17 @@ async def main():
         Config.MAX_CONCURRENT_DOWNLOADS = args.max_concurrent
     if args.batch_size:
         Config.BATCH_SIZE = args.batch_size
+    if args.timeout:
+        Config.DOWNLOAD_TIMEOUT = args.timeout
+    
+    # SSL configuration
+    verify_ssl = not args.no_ssl_verify and Config.VERIFY_SSL
+    
+    if args.no_ssl_verify:
+        logger.warning("SSL verification disabled via command line argument")
     
     # Create pipeline
-    pipeline = ExamPaperPipeline()
+    pipeline = ExamPaperPipeline(verify_ssl=verify_ssl)
     
     try:
         if args.scrape_only:
@@ -296,7 +325,8 @@ async def main():
         logger.info("Pipeline interrupted by user")
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
-        raise
+        if not args.ignore_ssl_errors:
+            raise
 
 
 if __name__ == "__main__":

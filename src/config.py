@@ -1,4 +1,4 @@
-"""Configuration management for the exam papers scraper."""
+
 
 import os
 from pathlib import Path
@@ -28,6 +28,10 @@ class Config:
     DOWNLOAD_TIMEOUT: int = int(os.getenv("DOWNLOAD_TIMEOUT", "30"))
     RETRY_ATTEMPTS: int = int(os.getenv("RETRY_ATTEMPTS", "3"))
     
+    # SSL Configuration
+    VERIFY_SSL: bool = os.getenv("VERIFY_SSL", "true").lower() in ("true", "1", "yes", "on")
+    SSL_CERT_PATH: str = os.getenv("SSL_CERT_PATH", "")  # Custom certificate path if needed
+    
     # OpenAI configuration
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "text-embedding-3-small")
@@ -50,6 +54,7 @@ class Config:
     def validate(cls) -> Dict[str, Any]:
         """Validate configuration and return missing required fields."""
         errors = {}
+        warnings = {}
         
         if not cls.OPENAI_API_KEY:
             errors["OPENAI_API_KEY"] = "OpenAI API key is required"
@@ -60,7 +65,11 @@ class Config:
         if not cls.QDRANT_API_KEY:
             errors["QDRANT_API_KEY"] = "Qdrant API key is required"
         
-        return errors
+        # SSL warnings
+        if not cls.VERIFY_SSL:
+            warnings["VERIFY_SSL"] = "SSL verification is disabled - not recommended for production"
+        
+        return {"errors": errors, "warnings": warnings}
     
     @classmethod
     def create_directories(cls) -> None:

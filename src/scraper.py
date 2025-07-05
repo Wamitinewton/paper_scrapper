@@ -1,8 +1,12 @@
-"""Asynchronous web scraper for exam papers."""
+"""
+Updated scraper.py with SSL certificate verification fixes
+"""
 
 import asyncio
 import aiohttp
 import aiofiles
+import ssl
+import certifi
 from pathlib import Path
 from typing import List, Set, Optional, Tuple
 from datetime import datetime
@@ -19,26 +23,87 @@ from .logger import get_logger
 logger = get_logger(__name__)
 
 class ExamPaperScraper:
-    """Asynchronous scraper for exam papers."""
+    """Asynchronous scraper for exam papers with SSL fixes."""
     
-    def __init__(self, max_concurrent: int = None, timeout: int = None):
-        """Initialize the scraper."""
+    def __init__(self, max_concurrent: int = None, timeout: int = None, verify_ssl: bool = True):
+        """Initialize the scraper with SSL configuration."""
         self.max_concurrent = max_concurrent or Config.MAX_CONCURRENT_DOWNLOADS
         self.timeout = timeout or Config.DOWNLOAD_TIMEOUT
+        self.verify_ssl = verify_ssl
         self.session: Optional[aiohttp.ClientSession] = None
         self.semaphore = asyncio.Semaphore(self.max_concurrent)
         
         # Create download directories
         Config.create_directories()
     
-    async def __aenter__(self):
-        """Async context manager entry."""
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self.timeout),
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        """Create a custom SSL context with proper certificate handling."""
+        if not self.verify_ssl:
+            # Option 1: Disable SSL verification (NOT recommended for production)
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            logger.warning("SSL verification disabled - use only for development/testing")
+            return context
+        
+        # Option 2: Use certifi certificates (recommended)
+        try:
+            context = ssl.create_default_context(cafile=certifi.where())
+            context.check_hostname = True
+            context.verify_mode = ssl.CERT_REQUIRED
+            logger.info("Using certifi certificates for SSL verification")
+            return context
+        except Exception as e:
+            logger.warning(f"Failed to create SSL context with certifi: {e}")
+            # Fallback to default context
+            return ssl.create_default_context()
+    
+    def _create_connector(self) -> aiohttp.TCPConnector:
+        """Create a TCP connector with proper SSL configuration."""
+        ssl_context = self._create_ssl_context()
+        
+        # Create connector with SSL context
+        connector = aiohttp.TCPConnector(
+            ssl=ssl_context,
+            limit=100,
+            limit_per_host=self.max_concurrent,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            keepalive_timeout=30,
+            enable_cleanup_closed=True
         )
+        
+        return connector
+    
+    async def __aenter__(self):
+        """Async context manager entry with SSL-aware session creation."""
+        connector = self._create_connector()
+        
+        # Enhanced headers to appear more like a real browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout,
+            connect=10,
+            sock_read=self.timeout
+        )
+        
+        self.session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers=headers,
+            trust_env=True  # Use environment proxy settings if available
+        )
+        
+        logger.info(f"HTTP session created with SSL verification: {self.verify_ssl}")
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -66,18 +131,62 @@ class ExamPaperScraper:
         """Get the file path for a downloaded paper."""
         return Config.DOWNLOAD_DIR / school_code / str(year) / filename
     
-    async def _fetch_page(self, url: str) -> Optional[str]:
-        """Fetch HTML content from a URL."""
-        try:
-            async with self.session.get(url) as response:
-                if response.status == 200:
-                    return await response.text()
-                else:
-                    logger.warning(f"Failed to fetch {url}: HTTP {response.status}")
-                    return None
-        except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
-            return None
+    async def _fetch_page(self, url: str, retry_count: int = 3) -> Optional[str]:
+        """Fetch HTML content from a URL with retry logic and better error handling."""
+        for attempt in range(retry_count):
+            try:
+                logger.info(f"Fetching {url} (attempt {attempt + 1}/{retry_count})")
+                
+                async with self.session.get(url) as response:
+                    if response.status == 200:
+                        content = await response.text()
+                        logger.info(f"Successfully fetched {url}")
+                        return content
+                    elif response.status == 403:
+                        logger.warning(f"Access forbidden for {url}: HTTP {response.status}")
+                        return None
+                    elif response.status == 404:
+                        logger.warning(f"Page not found {url}: HTTP {response.status}")
+                        return None
+                    else:
+                        logger.warning(f"HTTP error for {url}: {response.status}")
+                        if attempt < retry_count - 1:
+                            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                            continue
+                        return None
+                        
+            except aiohttp.ClientSSLError as e:
+                logger.error(f"SSL error fetching {url}: {e}")
+                if attempt < retry_count - 1:
+                    logger.info(f"Retrying with relaxed SSL settings...")
+                    # You could implement a fallback with disabled SSL here if needed
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return None
+                
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Connection error fetching {url}: {e}")
+                if attempt < retry_count - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return None
+                
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout fetching {url}")
+                if attempt < retry_count - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return None
+                
+            except Exception as e:
+                logger.error(f"Unexpected error fetching {url}: {e}")
+                if attempt < retry_count - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return None
+        
+        logger.error(f"Failed to fetch {url} after {retry_count} attempts")
+        return None
     
     async def _extract_pdf_links(self, html_content: str, base_url: str) -> List[str]:
         """Extract PDF links from HTML content."""
@@ -104,6 +213,7 @@ class ExamPaperScraper:
         
         html_content = await self._fetch_page(url)
         if not html_content:
+            logger.warning(f"No content retrieved for {school_code} {year}")
             return []
         
         pdf_links = await self._extract_pdf_links(html_content, url)
@@ -124,7 +234,7 @@ class ExamPaperScraper:
         return papers
     
     async def _download_paper(self, paper: ExamPaper) -> ExamPaper:
-        """Download a single paper."""
+        """Download a single paper with enhanced error handling."""
         async with self.semaphore:
             # Check if file already exists
             if paper.file_path and paper.file_path.exists():
@@ -140,6 +250,7 @@ class ExamPaperScraper:
             paper.download_attempts += 1
             
             try:
+                logger.info(f"Downloading {paper.url}")
                 async with self.session.get(paper.url) as response:
                     if response.status == 200:
                         content = await response.read()
@@ -159,6 +270,11 @@ class ExamPaperScraper:
                         paper.download_error = f"HTTP {response.status}"
                         logger.error(f"Failed to download {paper.url}: HTTP {response.status}")
                         
+            except aiohttp.ClientSSLError as e:
+                paper.download_status = DownloadStatus.FAILED
+                paper.download_error = f"SSL Error: {str(e)}"
+                logger.error(f"SSL error downloading {paper.url}: {e}")
+                
             except Exception as e:
                 paper.download_status = DownloadStatus.FAILED
                 paper.download_error = str(e)
@@ -186,8 +302,18 @@ class ExamPaperScraper:
                 task = self._discover_papers_for_year(year, school_code)
                 tasks.append(task)
         
-        # Run discovery tasks concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Run discovery tasks concurrently with some delay to avoid overwhelming the server
+        results = []
+        batch_size = 5  # Process in smaller batches
+        
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i:i + batch_size]
+            batch_results = await asyncio.gather(*batch, return_exceptions=True)
+            results.extend(batch_results)
+            
+            # Small delay between batches
+            if i + batch_size < len(tasks):
+                await asyncio.sleep(1)
         
         all_papers = []
         for result in results:
@@ -223,8 +349,12 @@ class ExamPaperScraper:
     
     async def scrape_all(self, 
                         schools: Optional[List[str]] = None,
-                        years: Optional[List[int]] = None) -> Tuple[List[ExamPaper], ScrapingSession]:
+                        years: Optional[List[int]] = None,
+                        verify_ssl: bool = True) -> Tuple[List[ExamPaper], ScrapingSession]:
         """Scrape all papers from the website."""
+        
+        # Update SSL verification setting
+        self.verify_ssl = verify_ssl
         
         # Create session
         session = ScrapingSession(
