@@ -1,0 +1,40 @@
+# Web scraping dependencies
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+aiohttp>=3.8.0
+aiofiles>=23.2.0
+
+# PDF processing
+PyPDF2>=3.0.0
+pdfplumber>=0.9.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Vector database
+qdrant-client>=1.6.0
+
+# OpenAI embeddings
+openai>=1.3.0
+
+# Environment management
+python-dotenv>=1.0.0
+
+# Progress tracking
+tqdm>=4.66.0
+
+# Logging
+structlog>=23.2.0
+
+# Async utilities
+asyncio-throttle>=1.0.0
+
+# File handling
+pathlib>=1.0.0
+
+# Data validation
+pydantic>=2.0.0
+
+# HTTP client with retry
+httpx>=0.25.0
