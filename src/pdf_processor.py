@@ -1,4 +1,3 @@
-"""PDF processing utilities for extracting text content."""
 
 import asyncio
 from pathlib import Path

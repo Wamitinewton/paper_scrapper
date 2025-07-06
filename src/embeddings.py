@@ -24,40 +24,49 @@ class EmbeddingsManager:
         """Initialize the embeddings manager."""
         
         # OpenAI configuration
-        # op
         self.openai_client = openai.AsyncOpenAI(
             api_key=openai_api_key or Config.OPENAI_API_KEY
         )
         self.embedding_model = Config.OPENAI_MODEL
         
-        # Qdrant configuration
-        self.qdrant_client = QdrantClient(
-            url=qdrant_url or Config.QDRANT_URL,
-            api_key=qdrant_api_key or Config.QDRANT_API_KEY,
-        )
+        qdrant_url = qdrant_url or Config.QDRANT_URL
+        qdrant_api_key = qdrant_api_key or Config.QDRANT_API_KEY
+        
+        if qdrant_url and ':6333' in qdrant_url:
+            qdrant_url = qdrant_url.replace(':6333', '')
+            logger.info("Removed :6333 port from Qdrant URL for cloud connection")
+        
+        try:
+            self.qdrant_client = QdrantClient(
+                url=qdrant_url,
+                api_key=qdrant_api_key,
+                timeout=30,
+                https=True,
+            )
+            logger.info(f"Qdrant client configured for cloud connection: {qdrant_url}")
+        except Exception as e:
+            logger.error(f"Failed to initialize Qdrant client: {e}")
+            raise
+        
         self.collection_name = Config.QDRANT_COLLECTION_NAME
         
-        # Batch processing
         self.batch_size = Config.BATCH_SIZE
         
-        # Initialize collection
         self._ensure_collection_exists()
     
     def _ensure_collection_exists(self) -> None:
         """Ensure the Qdrant collection exists."""
         try:
-            # Check if collection exists
             collections = self.qdrant_client.get_collections()
             collection_names = [col.name for col in collections.collections]
             
             if self.collection_name not in collection_names:
                 logger.info(f"Creating Qdrant collection: {self.collection_name}")
                 
-                # Create collection with appropriate vector configuration
                 self.qdrant_client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
-                        size=1536,  # text-embedding-3-small dimension
+                        size=1536,  
                         distance=Distance.COSINE
                     )
                 )
@@ -102,7 +111,6 @@ class EmbeddingsManager:
     def _create_point_metadata(self, paper: ExamPaper, chunk_index: int, chunk_text: str) -> Dict[str, Any]:
         """Create metadata for a vector point."""
         return {
-            # Paper information
             "paper_url": paper.url,
             "paper_filename": paper.filename,
             "school_code": paper.school_code,

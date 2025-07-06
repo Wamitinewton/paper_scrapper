@@ -1,6 +1,3 @@
-"""
-Updated main.py with SSL configuration support
-"""
 
 import asyncio
 import argparse
@@ -30,17 +27,14 @@ class ExamPaperPipeline:
         self.processor = PDFProcessor()
         self.embeddings_manager = EmbeddingsManager()
         
-        # Validate configuration
         config_validation = Config.validate()
         
-        # Handle errors
         if config_validation["errors"]:
             logger.error("Configuration validation failed:")
             for field, error in config_validation["errors"].items():
                 logger.error(f"  {field}: {error}")
             raise ValueError("Invalid configuration. Please check your .env file.")
         
-        # Handle warnings
         if config_validation["warnings"]:
             logger.warning("Configuration warnings:")
             for field, warning in config_validation["warnings"].items():
@@ -58,14 +52,12 @@ class ExamPaperPipeline:
         async with ExamPaperScraper(verify_ssl=self.verify_ssl) as scraper:
             self.scraper = scraper
             
-            # Scrape all papers
             papers, session = await scraper.scrape_all(schools, years, verify_ssl=self.verify_ssl)
             
             if retry_failed and session.total_papers_failed > 0:
                 logger.info(f"Retrying {session.total_papers_failed} failed downloads")
                 papers = await scraper.retry_failed_downloads(papers)
             
-            # Save session summary
             self._save_session_summary(session, "scraping_session.json")
             
             return papers
@@ -77,7 +69,6 @@ class ExamPaperPipeline:
         
         processed_papers = await self.processor.process_papers(papers)
         
-        # Save processing summary
         self._save_processing_summary(processed_papers, "processing_summary.json")
         
         return processed_papers
@@ -89,7 +80,6 @@ class ExamPaperPipeline:
         
         embedded_papers = await self.embeddings_manager.process_papers_embeddings(papers)
         
-        # Save embeddings summary
         self._save_embeddings_summary(embedded_papers, "embeddings_summary.json")
         
         return embedded_papers
@@ -108,7 +98,6 @@ class ExamPaperPipeline:
         papers = []
         
         try:
-            # Phase 1: Scraping
             if not skip_scraping:
                 papers = await self.scrape_papers(schools, years)
                 logger.info(f"Scraping completed: {len(papers)} papers")
@@ -116,13 +105,11 @@ class ExamPaperPipeline:
                 papers = self._load_existing_papers()
                 logger.info(f"Loaded existing papers: {len(papers)}")
             
-            # Phase 2: Processing
             if not skip_processing:
                 papers = await self.process_papers(papers)
                 processed_count = sum(1 for p in papers if p.is_processed)
                 logger.info(f"Processing completed: {processed_count} papers processed")
             
-            # Phase 3: Embeddings
             if not skip_embeddings:
                 papers = await self.generate_embeddings(papers)
                 embedded_count = sum(1 for p in papers if p.embedding_id)

@@ -1,52 +1,42 @@
 
-
 import os
 from pathlib import Path
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 class Config:
     """Configuration class for the scraper."""
     
-    # Base configuration
     BASE_URL: str = os.getenv("BASE_URL", "https://exampapers.must.ac.ke")
     DOWNLOAD_DIR: Path = Path("downloads")
     LOGS_DIR: Path = Path("logs")
     
-    # School codes and years
     SCHOOL_CODES: List[str] = [
         "safs", "sbe", "sci", "sea", "sed", "shs", "son", "spas", "tvet"
     ]
     
     YEARS: List[int] = list(range(2014, 2025))  # 2014 to 2024
     
-    # Scraping configuration
     MAX_CONCURRENT_DOWNLOADS: int = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "5"))
     DOWNLOAD_TIMEOUT: int = int(os.getenv("DOWNLOAD_TIMEOUT", "30"))
     RETRY_ATTEMPTS: int = int(os.getenv("RETRY_ATTEMPTS", "3"))
     
-    # SSL Configuration
     VERIFY_SSL: bool = os.getenv("VERIFY_SSL", "true").lower() in ("true", "1", "yes", "on")
     SSL_CERT_PATH: str = os.getenv("SSL_CERT_PATH", "")  # Custom certificate path if needed
     
-    # OpenAI configuration
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "text-embedding-3-small")
     
-    # Qdrant configuration
     QDRANT_URL: str = os.getenv("QDRANT_URL", "")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
     QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "exam_papers")
     
-    # Processing configuration
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "100"))
     
-    # Logging configuration
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE: Path = Path(os.getenv("LOG_FILE", "logs/scraper.log"))
     
