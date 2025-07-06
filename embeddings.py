@@ -1,0 +1,353 @@
+
+import asyncio
+import hashlib
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+import logging
+
+import openai
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+
+from config import Config
+from models import ExamPaper, Status
+
+logger = logging.getLogger(__name__)
+
+class EmbeddingsManager:
+    """Manage embeddings generation and vector storage."""
+    
+    def __init__(self,
+                 openai_api_key: Optional[str] = None,
+                 qdrant_url: Optional[str] = None,
+                 qdrant_api_key: Optional[str] = None):
+        """
+        Initialize embeddings manager.
+        
+        Args:
+            openai_api_key: OpenAI API key
+            qdrant_url: Qdrant database URL
+            qdrant_api_key: Qdrant API key
+        """
+        # OpenAI client
+        self.openai_client = openai.AsyncOpenAI(
+            api_key=openai_api_key or Config.OPENAI_API_KEY
+        )
+        self.embedding_model = Config.OPENAI_MODEL
+        
+        # Qdrant client
+        qdrant_url = qdrant_url or Config.QDRANT_URL
+        qdrant_api_key = qdrant_api_key or Config.QDRANT_API_KEY
+        
+        # Clean up URL format for cloud Qdrant
+        if qdrant_url and ':6333' in qdrant_url:
+            qdrant_url = qdrant_url.replace(':6333', '')
+            logger.info("Cleaned Qdrant URL for cloud connection")
+        
+        try:
+            self.qdrant_client = QdrantClient(
+                url=qdrant_url,
+                api_key=qdrant_api_key,
+                timeout=60,
+                https=True,
+            )
+            logger.info(f"Connected to Qdrant: {qdrant_url}")
+        except Exception as e:
+            logger.error(f"Failed to connect to Qdrant: {e}")
+            raise
+        
+        self.collection_name = Config.QDRANT_COLLECTION_NAME
+        self.batch_size = Config.EMBEDDING_BATCH_SIZE
+        
+        self._ensure_collection_exists()
+    
+    def _ensure_collection_exists(self) -> None:
+        """Create collection if it doesn't exist."""
+        try:
+            collections = self.qdrant_client.get_collections()
+            collection_names = [col.name for col in collections.collections]
+            
+            if self.collection_name not in collection_names:
+                logger.info(f"Creating collection: {self.collection_name}")
+                
+                self.qdrant_client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(
+                        size=1536,  # text-embedding-3-small dimension
+                        distance=Distance.COSINE
+                    )
+                )
+                logger.info(f"Collection created: {self.collection_name}")
+            else:
+                logger.info(f"Collection exists: {self.collection_name}")
+                
+        except Exception as e:
+            logger.error(f"Error ensuring collection exists: {e}")
+            raise
+    
+    def _generate_chunk_id(self, paper: ExamPaper, chunk_index: int) -> str:
+        """Generate unique ID for a text chunk."""
+        content = f"{paper.url}_{chunk_index}"
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def _create_point_payload(self, paper: ExamPaper, chunk_index: int, chunk_text: str) -> Dict[str, Any]:
+        """Create metadata payload for vector point."""
+        return {
+            "paper_url": paper.url,
+            "paper_filename": paper.filename,
+            "school_code": paper.school_code,
+            "school_name": paper.school_name,
+            "year": paper.year,
+            
+            "chunk_index": chunk_index,
+            "chunk_text_preview": chunk_text[:300], 
+            "chunk_length": len(chunk_text),
+            
+            "file_size": paper.file_size,
+            "page_count": paper.page_count,
+            
+            "processed_at": paper.processed_at.isoformat() if paper.processed_at else None,
+            "embedded_at": datetime.now().isoformat(),
+            
+            **paper.metadata
+        }
+    
+    async def _generate_embedding(self, text: str) -> List[float]:
+        """Generate embedding for single text."""
+        try:
+            response = await self.openai_client.embeddings.create(
+                model=self.embedding_model,
+                input=text
+            )
+            return response.data[0].embedding
+        except Exception as e:
+            logger.error(f"Error generating embedding: {e}")
+            raise
+    
+    async def _generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for batch of texts."""
+        try:
+            response = await self.openai_client.embeddings.create(
+                model=self.embedding_model,
+                input=texts
+            )
+            return [data.embedding for data in response.data]
+        except Exception as e:
+            logger.error(f"Error generating batch embeddings: {e}")
+            raise
+    
+    async def embed_paper(self, paper: ExamPaper) -> ExamPaper:
+        """
+        Generate embeddings for a single paper.
+        
+        Args:
+            paper: ExamPaper to embed
+            
+        Returns:
+            Updated paper with embedding status
+        """
+        if not paper.is_processed or not paper.chunks:
+            paper.embedding_status = Status.FAILED
+            paper.last_error = "Paper not processed or no chunks available"
+            return paper
+        
+        paper.embedding_status = Status.IN_PROGRESS
+        
+        try:
+            logger.info(f"Generating embeddings for {paper.filename} ({len(paper.chunks)} chunks)")
+            
+            points = []
+            
+            for i in range(0, len(paper.chunks), self.batch_size):
+                batch_chunks = paper.chunks[i:i + self.batch_size]
+                batch_indices = list(range(i, min(i + self.batch_size, len(paper.chunks))))
+                
+                embeddings = await self._generate_embeddings_batch(batch_chunks)
+                
+                for j, (chunk_text, embedding) in enumerate(zip(batch_chunks, embeddings)):
+                    chunk_index = batch_indices[j]
+                    point_id = self._generate_chunk_id(paper, chunk_index)
+                    
+                    point = PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload=self._create_point_payload(paper, chunk_index, chunk_text)
+                    )
+                    points.append(point)
+            
+            self.qdrant_client.upsert(
+                collection_name=self.collection_name,
+                points=points
+            )
+            
+            paper.embedding_status = Status.COMPLETED
+            paper.embedded_at = datetime.now()
+            
+            logger.info(f"Successfully embedded {paper.filename} ({len(points)} vectors)")
+            
+        except Exception as e:
+            paper.embedding_status = Status.FAILED
+            paper.last_error = str(e)
+            logger.error(f"Error embedding {paper.filename}: {e}")
+        
+        return paper
+    
+    async def embed_papers(self, papers: List[ExamPaper], max_concurrent: int = 3) -> List[ExamPaper]:
+        """
+        Generate embeddings for multiple papers.
+        
+        Args:
+            papers: List of papers to embed
+            max_concurrent: Maximum concurrent embedding operations
+            
+        Returns:
+            List of papers with updated embedding status
+        """
+        papers_to_embed = [
+            p for p in papers 
+            if p.is_processed and p.chunks and p.embedding_status != Status.COMPLETED
+        ]
+        
+        if not papers_to_embed:
+            logger.info("No papers need embedding")
+            return papers
+        
+        logger.info(f"Embedding {len(papers_to_embed)} papers")
+        
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def embed_with_semaphore(paper):
+            async with semaphore:
+                return await self.embed_paper(paper)
+        
+        tasks = [embed_with_semaphore(paper) for paper in papers_to_embed]
+        
+        results = []
+        for i, task in enumerate(asyncio.as_completed(tasks)):
+            result = await task
+            results.append(result)
+            
+            if (i + 1) % 5 == 0:
+                logger.info(f"Embedding progress: {i + 1}/{len(papers_to_embed)} completed")
+        
+        paper_dict = {p.url: p for p in papers}
+        for embedded_paper in results:
+            paper_dict[embedded_paper.url] = embedded_paper
+        
+        completed = sum(1 for r in results if r.embedding_status == Status.COMPLETED)
+        failed = sum(1 for r in results if r.embedding_status == Status.FAILED)
+        
+        logger.info(f"Embedding completed: {completed} successful, {failed} failed")
+        
+        return list(paper_dict.values())
+    
+    async def search_similar(self, 
+                           query: str, 
+                           limit: int = 10,
+                           school_filter: Optional[str] = None,
+                           year_filter: Optional[int] = None,
+                           score_threshold: float = 0.7) -> List[Dict[str, Any]]:
+        """
+        Search for similar content.
+        
+        Args:
+            query: Search query
+            limit: Maximum results to return
+            school_filter: Filter by school code
+            year_filter: Filter by year
+            score_threshold: Minimum similarity score
+            
+        Returns:
+            List of search results with metadata
+        """
+        try:
+            query_embedding = await self._generate_embedding(query)
+            
+            must_conditions = []
+            if school_filter:
+                must_conditions.append(
+                    FieldCondition(key="school_code", match=MatchValue(value=school_filter))
+                )
+            if year_filter:
+                must_conditions.append(
+                    FieldCondition(key="year", match=MatchValue(value=year_filter))
+                )
+            
+            query_filter = Filter(must=must_conditions) if must_conditions else None
+            
+            search_results = self.qdrant_client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                query_filter=query_filter,
+                limit=limit,
+                score_threshold=score_threshold
+            )
+            
+            results = []
+            for hit in search_results:
+                results.append({
+                    "score": hit.score,
+                    "metadata": hit.payload,
+                    "chunk_id": hit.id
+                })
+            
+            logger.info(f"Search completed: {len(results)} results for query '{query}'")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error searching: {e}")
+            raise
+    
+    def get_collection_stats(self) -> Dict[str, Any]:
+        """Get collection statistics."""
+        try:
+            collection_info = self.qdrant_client.get_collection(self.collection_name)
+            
+            scroll_result = self.qdrant_client.scroll(
+                collection_name=self.collection_name,
+                limit=1000  
+            )
+            
+            school_counts = {}
+            year_counts = {}
+            
+            for point in scroll_result[0]:
+                payload = point.payload
+                school = payload.get("school_code", "unknown")
+                year = payload.get("year", "unknown")
+                
+                school_counts[school] = school_counts.get(school, 0) + 1
+                year_counts[year] = year_counts.get(year, 0) + 1
+            
+            return {
+                "total_vectors": collection_info.vectors_count,
+                "collection_status": collection_info.status,
+                "school_distribution": school_counts,
+                "year_distribution": year_counts,
+                "sample_size": len(scroll_result[0])
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting collection stats: {e}")
+            return {}
+    
+    def delete_paper_embeddings(self, paper: ExamPaper) -> bool:
+        """Delete all embeddings for a specific paper."""
+        try:
+            filter_condition = Filter(
+                must=[
+                    FieldCondition(key="paper_url", match=MatchValue(value=paper.url))
+                ]
+            )
+            
+            self.qdrant_client.delete(
+                collection_name=self.collection_name,
+                points_selector=filter_condition
+            )
+            
+            logger.info(f"Deleted embeddings for paper: {paper.filename}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting embeddings for {paper.filename}: {e}")
+            return False
