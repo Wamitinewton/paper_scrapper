@@ -1,4 +1,3 @@
-
 import ssl
 import aiohttp
 import certifi
@@ -63,9 +62,9 @@ class HTTPClient:
             limit_per_host=10,
             ttl_dns_cache=300,
             use_dns_cache=True,
-            keepalive_timeout=30,
             enable_cleanup_closed=True,
-            force_close=True,
+            force_close=False,  # Allow connection reuse
+            keepalive_timeout=30,  
             timeout_ceil_threshold=5
         )
     
@@ -98,7 +97,7 @@ class HTTPClient:
             timeout=timeout,
             headers=headers,
             trust_env=True,
-            raise_for_status=False  # Handle status codes manually
+            raise_for_status=False 
         )
         
         logger.info(f"HTTP client initialized (SSL verify: {self.verify_ssl})")
@@ -108,7 +107,6 @@ class HTTPClient:
         """Async context manager exit."""
         if self.session:
             await self.session.close()
-            # Give the session time to close properly
             await asyncio.sleep(0.1)
     
     async def get(self, url: str, **kwargs) -> aiohttp.ClientResponse:
@@ -135,7 +133,7 @@ class HTTPClient:
             try:
                 logger.info(f"Fetching {url} (attempt {attempt + 1}/{retry_count})")
                 
-                async with self.get(url) as response:
+                async with self.session.get(url) as response:
                     if response.status == 200:
                         content = await response.text()
                         logger.info(f"Successfully fetched {url}")
@@ -195,7 +193,7 @@ class HTTPClient:
             try:
                 logger.info(f"Downloading {url} to {filepath} (attempt {attempt + 1}/{retry_count})")
                 
-                async with self.get(url) as response:
+                async with self.session.get(url) as response:
                     if response.status == 200:
                         # Stream download for large files
                         with open(filepath, 'wb') as f:
