@@ -24,6 +24,7 @@ class EmbeddingsManager:
         """Initialize the embeddings manager."""
         
         # OpenAI configuration
+        # op
         self.openai_client = openai.AsyncOpenAI(
             api_key=openai_api_key or Config.OPENAI_API_KEY
         )
