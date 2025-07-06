@@ -61,7 +61,6 @@ class PDFScraper:
                 absolute_url = urljoin(base_url, href)
                 pdf_links.append(absolute_url)
         
-        # Also look for links in the wp-content/uploads pattern you showed
         for link in soup.find_all('a', href=True):
             href = link['href']
             if '/wp-content/uploads/' in href and href.lower().endswith('.pdf'):
