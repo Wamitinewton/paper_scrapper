@@ -1,3 +1,4 @@
+"""Enhanced embeddings generation with better detection and processing."""
 
 import asyncio
 import hashlib
@@ -21,37 +22,27 @@ class EmbeddingsManager:
                  openai_api_key: Optional[str] = None,
                  qdrant_url: Optional[str] = None,
                  qdrant_api_key: Optional[str] = None):
-        """
-        Initialize embeddings manager.
-        
-        Args:
-            openai_api_key: OpenAI API key
-            qdrant_url: Qdrant database URL
-            qdrant_api_key: Qdrant API key
-        """
+        """Initialize embeddings manager."""
         # OpenAI client
         self.openai_client = openai.AsyncOpenAI(
             api_key=openai_api_key or Config.OPENAI_API_KEY
         )
         self.embedding_model = Config.OPENAI_MODEL
         
-        # Qdrant client
+        # Clean up Qdrant URL format
         qdrant_url = qdrant_url or Config.QDRANT_URL
-        qdrant_api_key = qdrant_api_key or Config.QDRANT_API_KEY
-        
-        # Clean up URL format for cloud Qdrant
         if qdrant_url and ':6333' in qdrant_url:
             qdrant_url = qdrant_url.replace(':6333', '')
-            logger.info("Cleaned Qdrant URL for cloud connection")
         
+        # Qdrant client
         try:
             self.qdrant_client = QdrantClient(
                 url=qdrant_url,
-                api_key=qdrant_api_key,
+                api_key=qdrant_api_key or Config.QDRANT_API_KEY,
                 timeout=60,
                 https=True,
             )
-            logger.info(f"Connected to Qdrant: {qdrant_url}")
+            logger.info(f"Connected to Qdrant at {qdrant_url}")
         except Exception as e:
             logger.error(f"Failed to connect to Qdrant: {e}")
             raise
@@ -87,7 +78,7 @@ class EmbeddingsManager:
     
     def _generate_chunk_id(self, paper: ExamPaper, chunk_index: int) -> str:
         """Generate unique ID for a text chunk."""
-        content = f"{paper.url}_{chunk_index}"
+        content = f"{paper.url}_{chunk_index}_{len(paper.chunks[chunk_index]) if chunk_index < len(paper.chunks) else 0}"
         return hashlib.md5(content.encode()).hexdigest()
     
     def _create_point_payload(self, paper: ExamPaper, chunk_index: int, chunk_text: str) -> Dict[str, Any]:
@@ -100,8 +91,9 @@ class EmbeddingsManager:
             "year": paper.year,
             
             "chunk_index": chunk_index,
-            "chunk_text_preview": chunk_text[:300], 
+            "chunk_text_preview": chunk_text[:200],
             "chunk_length": len(chunk_text),
+            "chunk_word_count": len(chunk_text.split()),
             
             "file_size": paper.file_size,
             "page_count": paper.page_count,
@@ -136,19 +128,21 @@ class EmbeddingsManager:
             logger.error(f"Error generating batch embeddings: {e}")
             raise
     
+    def _paper_needs_embedding(self, paper: ExamPaper) -> bool:
+        """Check if paper needs embedding generation."""
+        return (
+            paper.processing_status == Status.COMPLETED and 
+            paper.chunks and 
+            len(paper.chunks) > 0 and
+            paper.embedding_status != Status.COMPLETED
+        )
+    
     async def embed_paper(self, paper: ExamPaper) -> ExamPaper:
-        """
-        Generate embeddings for a single paper.
-        
-        Args:
-            paper: ExamPaper to embed
-            
-        Returns:
-            Updated paper with embedding status
-        """
-        if not paper.is_processed or not paper.chunks:
-            paper.embedding_status = Status.FAILED
-            paper.last_error = "Paper not processed or no chunks available"
+        """Generate embeddings for a single paper."""
+        if not self._paper_needs_embedding(paper):
+            if not paper.chunks:
+                paper.embedding_status = Status.FAILED
+                paper.last_error = "No chunks available for embedding"
             return paper
         
         paper.embedding_status = Status.IN_PROGRESS
@@ -175,15 +169,19 @@ class EmbeddingsManager:
                     )
                     points.append(point)
             
-            self.qdrant_client.upsert(
-                collection_name=self.collection_name,
-                points=points
-            )
-            
-            paper.embedding_status = Status.COMPLETED
-            paper.embedded_at = datetime.now()
-            
-            logger.info(f"Successfully embedded {paper.filename} ({len(points)} vectors)")
+            if points:
+                self.qdrant_client.upsert(
+                    collection_name=self.collection_name,
+                    points=points
+                )
+                
+                paper.embedding_status = Status.COMPLETED
+                paper.embedded_at = datetime.now()
+                
+                logger.info(f"Successfully embedded {paper.filename} ({len(points)} vectors)")
+            else:
+                paper.embedding_status = Status.FAILED
+                paper.last_error = "No valid points generated"
             
         except Exception as e:
             paper.embedding_status = Status.FAILED
@@ -193,26 +191,14 @@ class EmbeddingsManager:
         return paper
     
     async def embed_papers(self, papers: List[ExamPaper], max_concurrent: int = 3) -> List[ExamPaper]:
-        """
-        Generate embeddings for multiple papers.
-        
-        Args:
-            papers: List of papers to embed
-            max_concurrent: Maximum concurrent embedding operations
-            
-        Returns:
-            List of papers with updated embedding status
-        """
-        papers_to_embed = [
-            p for p in papers 
-            if p.is_processed and p.chunks and p.embedding_status != Status.COMPLETED
-        ]
+        """Generate embeddings for multiple papers."""
+        papers_to_embed = [p for p in papers if self._paper_needs_embedding(p)]
         
         if not papers_to_embed:
             logger.info("No papers need embedding")
             return papers
         
-        logger.info(f"Embedding {len(papers_to_embed)} papers")
+        logger.info(f"Embedding {len(papers_to_embed)} papers with valid chunks")
         
         semaphore = asyncio.Semaphore(max_concurrent)
         
@@ -223,21 +209,24 @@ class EmbeddingsManager:
         tasks = [embed_with_semaphore(paper) for paper in papers_to_embed]
         
         results = []
-        for i, task in enumerate(asyncio.as_completed(tasks)):
+        completed_count = 0
+        
+        for task in asyncio.as_completed(tasks):
             result = await task
             results.append(result)
+            completed_count += 1
             
-            if (i + 1) % 5 == 0:
-                logger.info(f"Embedding progress: {i + 1}/{len(papers_to_embed)} completed")
+            if completed_count % 50 == 0:
+                logger.info(f"Embedding progress: {completed_count}/{len(papers_to_embed)} completed")
         
         paper_dict = {p.url: p for p in papers}
         for embedded_paper in results:
             paper_dict[embedded_paper.url] = embedded_paper
         
-        completed = sum(1 for r in results if r.embedding_status == Status.COMPLETED)
+        successful = sum(1 for r in results if r.embedding_status == Status.COMPLETED)
         failed = sum(1 for r in results if r.embedding_status == Status.FAILED)
         
-        logger.info(f"Embedding completed: {completed} successful, {failed} failed")
+        logger.info(f"Embedding completed: {successful} successful, {failed} failed")
         
         return list(paper_dict.values())
     
@@ -247,19 +236,7 @@ class EmbeddingsManager:
                            school_filter: Optional[str] = None,
                            year_filter: Optional[int] = None,
                            score_threshold: float = 0.7) -> List[Dict[str, Any]]:
-        """
-        Search for similar content.
-        
-        Args:
-            query: Search query
-            limit: Maximum results to return
-            school_filter: Filter by school code
-            year_filter: Filter by year
-            score_threshold: Minimum similarity score
-            
-        Returns:
-            List of search results with metadata
-        """
+        """Search for similar content."""
         try:
             query_embedding = await self._generate_embedding(query)
             
@@ -291,7 +268,7 @@ class EmbeddingsManager:
                     "chunk_id": hit.id
                 })
             
-            logger.info(f"Search completed: {len(results)} results for query '{query}'")
+            logger.info(f"Search completed: {len(results)} results for '{query}'")
             return results
             
         except Exception as e:
@@ -305,31 +282,37 @@ class EmbeddingsManager:
             
             scroll_result = self.qdrant_client.scroll(
                 collection_name=self.collection_name,
-                limit=1000  
+                limit=1000,
+                with_payload=True
             )
             
             school_counts = {}
             year_counts = {}
+            total_points = 0
             
-            for point in scroll_result[0]:
-                payload = point.payload
-                school = payload.get("school_code", "unknown")
-                year = payload.get("year", "unknown")
+            if scroll_result and len(scroll_result) > 0:
+                points = scroll_result[0] if isinstance(scroll_result, tuple) else scroll_result
                 
-                school_counts[school] = school_counts.get(school, 0) + 1
-                year_counts[year] = year_counts.get(year, 0) + 1
+                for point in points:
+                    total_points += 1
+                    payload = point.payload
+                    school = payload.get("school_code", "unknown")
+                    year = payload.get("year", "unknown")
+                    
+                    school_counts[school] = school_counts.get(school, 0) + 1
+                    year_counts[year] = year_counts.get(year, 0) + 1
             
             return {
                 "total_vectors": collection_info.vectors_count,
                 "collection_status": collection_info.status,
                 "school_distribution": school_counts,
                 "year_distribution": year_counts,
-                "sample_size": len(scroll_result[0])
+                "sample_size": total_points
             }
             
         except Exception as e:
             logger.error(f"Error getting collection stats: {e}")
-            return {}
+            return {"error": str(e)}
     
     def delete_paper_embeddings(self, paper: ExamPaper) -> bool:
         """Delete all embeddings for a specific paper."""

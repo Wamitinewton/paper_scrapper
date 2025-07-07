@@ -1,5 +1,4 @@
 """
-Exam Papers Scraper Script
 
 This script discovers and downloads exam papers from MUST website.
 Run this first before generating embeddings.
@@ -22,7 +21,6 @@ from models import load_papers_data, save_papers_data
 from scraper import PDFScraper
 from pdf_processor import PDFProcessor
 
-# Setup logging
 Config.create_directories() 
 
 logging.basicConfig(

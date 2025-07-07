@@ -197,7 +197,6 @@ class PDFScraper:
             # Create download tasks
             tasks = [self.download_paper(client, paper) for paper in papers]
             
-            # Execute with progress tracking
             results = []
             for i, task in enumerate(asyncio.as_completed(tasks)):
                 result = await task
