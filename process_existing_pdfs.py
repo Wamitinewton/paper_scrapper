@@ -1,7 +1,4 @@
 """
-Enhanced asynchronous processing pipeline for concurrent PDF processing and embedding generation.
-Optimized for handling 23,400+ papers efficiently.
-
 Usage:
     python process_existing_pdfs.py
     python process_existing_pdfs.py --schools sci sea --concurrent-processing 8 --concurrent-embedding 4
